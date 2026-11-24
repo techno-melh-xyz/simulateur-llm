@@ -1,0 +1,457 @@
+
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+
+<title>Laboratoire des modèles de langage</title>
+
+<style>
+* {
+    box-sizing: border-box;
+}
+
+body {
+    font-family: Arial, sans-serif;
+    background: #eef3f8;
+    color: #243447;
+    margin: 0;
+}
+
+header {
+    background: #183b60;
+    color: white;
+    padding: 25px;
+}
+
+header h1 {
+    margin: 0 0 10px;
+}
+
+main {
+    max-width: 1100px;
+    margin: 25px auto;
+    padding: 15px;
+}
+
+.card {
+    background: white;
+    padding: 25px;
+    border-radius: 12px;
+    margin-bottom: 20px;
+    box-shadow: 0 3px 12px #00000012;
+}
+
+.columns {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 20px;
+}
+
+textarea {
+    width: 100%;
+    min-height: 120px;
+    padding: 15px;
+    border: 1px solid #bccbd9;
+    border-radius: 6px;
+    font-size: 17px;
+    resize: vertical;
+}
+
+button {
+    background: #2376b9;
+    color: white;
+    border: none;
+    padding: 12px 20px;
+    border-radius: 6px;
+    cursor: pointer;
+    font-size: 16px;
+}
+
+button:disabled {
+    opacity: 0.5;
+    cursor: wait;
+}
+
+input[type="range"] {
+    width: 100%;
+}
+
+label {
+    display: block;
+    font-weight: bold;
+    margin-top: 20px;
+}
+
+#status {
+    background: #edf5fc;
+    border-left: 4px solid #2376b9;
+    padding: 15px;
+    margin-top: 15px;
+    overflow-wrap: anywhere;
+}
+
+#resultat {
+    min-height: 120px;
+    background: #f0f8f3;
+    border: 1px solid #c7e0cf;
+    padding: 15px;
+    border-radius: 6px;
+    white-space: pre-wrap;
+    line-height: 1.7;
+}
+
+.prediction {
+    display: grid;
+    grid-template-columns: 110px 1fr 80px;
+    align-items: center;
+    gap: 10px;
+    margin: 12px 0;
+}
+
+.barre {
+    background: #e5edf5;
+    height: 18px;
+    border-radius: 4px;
+    overflow: hidden;
+}
+
+.remplissage {
+    height: 100%;
+    background: #2376b9;
+}
+
+.info {
+    background: #fff8e7;
+    border-left: 4px solid #c38b25;
+    padding: 15px;
+}
+
+@media (max-width: 750px) {
+    .columns {
+        grid-template-columns: 1fr;
+    }
+}
+</style>
+</head>
+
+<body>
+
+<header>
+    <h1>🤖 Laboratoire des modèles de langage</h1>
+    Découvrir le fonctionnement d'un modèle préentraîné
+</header>
+
+<main>
+
+<section class="card">
+
+    <h2>Le modèle étudié</h2>
+
+    <p>
+        <strong>GPT-2 — 2019</strong><br>
+        OpenAI — environ 124 millions de paramètres.
+    </p>
+
+    <p>
+        Ce modèle n'est pas un assistant conversationnel.
+        Il cherche à prédire les prochains tokens
+        à partir du texte qui lui est fourni.
+    </p>
+
+    <button id="charger">
+        Charger le modèle IA
+    </button>
+
+    <div id="status">
+        Le modèle n'est pas encore chargé.
+    </div>
+
+</section>
+
+<div class="columns">
+
+<section class="card">
+
+    <h2>1. Texte de départ</h2>
+
+    <textarea id="texte">Once upon a time</textarea>
+
+    <label>
+        Nombre maximal de tokens :
+        <span id="nbValeur">30</span>
+    </label>
+
+    <input type="range"
+           id="nombre"
+           min="1" max="60" value="30">
+
+    <label>
+        Température :
+        <span id="tempValeur">0.8</span>
+    </label>
+
+    <input type="range"
+           id="temperature"
+           min="0.1" max="2"
+           step="0.1" value="0.8">
+
+    <p>
+        <button id="generer" disabled>
+            Générer la suite
+        </button>
+    </p>
+
+</section>
+
+<section class="card">
+
+    <h2>2. Texte généré</h2>
+
+    <div id="resultat">
+        Le résultat apparaîtra ici.
+    </div>
+
+</section>
+
+</div>
+
+<section class="card">
+
+    <h2>3. Probabilités du prochain token</h2>
+
+    <p>
+        Les dix tokens les plus probables,
+        avant application de la température.
+    </p>
+
+    <div id="probabilites"></div>
+
+</section>
+
+<section class="card info">
+
+    <h2>À retenir</h2>
+
+    <p>
+        Le modèle calcule des probabilités pour
+        sélectionner les prochains tokens.
+    </p>
+
+    <p>
+        Les paramètres du réseau de neurones
+        ne sont pas modifiés pendant cette expérience.
+        Le modèle n'apprend pas pendant son utilisation.
+    </p>
+
+    <p>
+        Les calculs sont réalisés directement
+        dans votre navigateur.
+    </p>
+
+</section>
+
+</main>
+
+<script type="module">
+
+import {
+    AutoTokenizer,
+    AutoModelForCausalLM,
+    env
+} from
+"https://cdn.jsdelivr.net/npm/@huggingface/transformers@3.7.2";
+
+env.allowLocalModels = false;
+
+const MODEL_ID = "Xenova/gpt2";
+
+let tokenizer;
+let model;
+
+const el = id => document.getElementById(id);
+
+el("nombre").oninput = () => {
+    el("nbValeur").textContent = el("nombre").value;
+};
+
+el("temperature").oninput = () => {
+    el("tempValeur").textContent =
+        el("temperature").value;
+};
+
+el("charger").onclick = async () => {
+
+    el("charger").disabled = true;
+
+    try {
+
+        el("status").textContent =
+            "Téléchargement du modèle...";
+
+        tokenizer = await AutoTokenizer.from_pretrained(
+            MODEL_ID
+        );
+
+        model = await AutoModelForCausalLM.from_pretrained(
+            MODEL_ID,
+            {
+                device: "wasm",
+                dtype: "q8",
+
+                progress_callback: info => {
+
+                    if (info.status === "progress") {
+
+                        el("status").textContent =
+                            "Téléchargement : " +
+                            info.file + " — " +
+                            Math.round(info.progress) + " %";
+
+                    }
+
+                }
+            }
+        );
+
+        el("status").textContent =
+            "Modèle chargé. Vous pouvez commencer.";
+
+        el("generer").disabled = false;
+
+    } catch (error) {
+
+        el("status").textContent =
+            "Erreur : " + error.message;
+
+        el("charger").disabled = false;
+
+    }
+
+};
+
+el("generer").onclick = async () => {
+
+    const texte = el("texte").value;
+
+    if (!texte.trim()) return;
+
+    el("generer").disabled = true;
+    el("status").textContent = "Calcul en cours...";
+
+    try {
+
+        const inputs = await tokenizer(texte, {
+            truncation: true,
+            max_length: 800
+        });
+
+        // Calcul des probabilités du prochain token
+
+        const output = await model(inputs);
+
+        const logits = output.logits;
+
+        const vocabSize = logits.dims[2];
+
+        const offset =
+            (logits.dims[1] - 1) * vocabSize;
+
+        const scores = Array.from(
+            logits.data.slice(
+                offset,
+                offset + vocabSize
+            )
+        );
+
+        const max = scores.reduce(
+            (a, b) => Math.max(a, b),
+            -Infinity
+        );
+
+        const exp = scores.map(
+            x => Math.exp(x - max)
+        );
+
+        const somme = exp.reduce(
+            (a, b) => a + b, 0
+        );
+
+        const top = exp.map(
+            (v, id) => ({
+                id,
+                p: v / somme
+            })
+        ).sort(
+            (a, b) => b.p - a.p
+        ).slice(0, 10);
+
+        el("probabilites").replaceChildren();
+
+        for (const item of top) {
+
+            const token = tokenizer.decode([item.id]);
+
+            const pourcentage = item.p * 100;
+
+            const ligne = document.createElement("div");
+            ligne.className = "prediction";
+
+            const mot = document.createElement("span");
+            mot.textContent = JSON.stringify(token);
+
+            const barre = document.createElement("div");
+            barre.className = "barre";
+
+            const remplissage = document.createElement("div");
+            remplissage.className = "remplissage";
+            remplissage.style.width = pourcentage + "%";
+
+            const valeur = document.createElement("span");
+            valeur.textContent =
+                pourcentage.toFixed(2) + " %";
+
+            barre.append(remplissage);
+            ligne.append(mot, barre, valeur);
+
+            el("probabilites").append(ligne);
+
+        }
+
+        // Génération autorégressive du texte
+
+        const resultat = await model.generate({
+            ...inputs,
+            max_new_tokens: Number(el("nombre").value),
+            temperature: Number(el("temperature").value),
+            do_sample: true,
+            top_k: 50
+        });
+
+        const textes = tokenizer.batch_decode(resultat, {
+            skip_special_tokens: true
+        });
+
+        el("resultat").textContent = textes[0];
+
+        el("status").textContent =
+            "Génération terminée.";
+
+    } catch (error) {
+
+        el("status").textContent =
+            "Erreur : " + error.message;
+
+    } finally {
+
+        el("generer").disabled = false;
+
+    }
+
+};
+
+</script>
+
+</body>
+</html>
