@@ -50,7 +50,7 @@ function nextDistributions(scores,temperature,k=50){
   ranked.sort((a,b)=>b.x-a.x||a.id-b.id);
   const kept=ranked.slice(0,k),den=kept.reduce((s,v)=>s+Math.exp((v.x-max)/temperature),0);
   if(!(total>0&&den>0))throw Error('Distribution non calculable.');
-  return {before:ranked.slice(0,10).map(v=>({id:v.id,p:100*Math.exp(v.x-max)/total})),after:kept.slice(0,10).map(v=>({id:v.id,p:100*Math.exp((v.x-max)/temperature)/den})),kept:kept.length};
+  return {before:ranked.slice(0,10).map(v=>({id:v.id,p:100*Math.exp(v.x-max)/total})),after:kept.slice(0,10).map(v=>({id:v.id,p:100*Math.exp((v.x-max)/temperature)/den})),candidates:kept,kept:kept.length};
 }
 async function generate(d){
   if(!model)throw Error('Modèle non chargé.');
@@ -66,11 +66,11 @@ async function generate(d){
       let data;try{data=logits.data;}catch(e){if(typeof logits.getData!=='function')throw e;data=await logits.getData();}
       const scores=data.slice(-vocab),dist=nextDistributions(scores,d.greedy?1:d.temp);
       const decode=items=>items.map(x=>({...x,token:tokenizer.decode([x.id],{skip_special_tokens:false})}));
-      send('predictions',{items:decode(dist.before),after:d.greedy?null:decode(dist.after),temperature:d.temp,kept:dist.kept});
+      send('predictions',{items:decode(dist.before),candidates:dist.candidates.map((v,i)=>({...v,token:i<10?tokenizer.decode([v.id],{skip_special_tokens:false}):''}))});
     }catch(e){send('prediction-warning',{message:message(e)});}
     finally{if(output)for(const value of Object.values(output))value?.dispose?.();}
     const start=performance.now();
-    result=await model.generate({...inputs,max_new_tokens:d.count,do_sample:!d.greedy,...(!d.greedy?{temperature:d.temp,top_k:50}:{})});
+    result=await model.generate({...inputs,max_new_tokens:d.count,do_sample:!d.greedy,repetition_penalty:1,no_repeat_ngram_size:0,...(!d.greedy?{temperature:d.temp,top_k:50,top_p:1}:{})});
     const seconds=(performance.now()-start)/1000;
     const ids=result.tolist()[0].slice(n).map(Number);
     const generated=tokenizer.decode(ids,{skip_special_tokens:true,clean_up_tokenization_spaces:false});
