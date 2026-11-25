@@ -13,7 +13,11 @@ async function load(id,source){
   if(!adapter)throw Error('Aucun adaptateur GPU. Utilisez l’API Hugging Face ou un navigateur compatible.');
   const base=source?.split('/').pop();
   const candidates=[...new Set([id,...(base?['onnx-community/'+base+'-ONNX','onnx-community/'+base,'Xenova/'+base]:[])])].filter(Boolean);
-  const choices=[['q4','model_q4.onnx'],['q8','model_quantized.onnx'],['int8','model_int8.onnx'],['uint8','model_uint8.onnx'],['fp32','model.onnx']];
+  const bloom=/^bigscience\/bloomz?-560m$/i.test(source||'');
+  const dtypes=[['q4','_q4'],...(bloom&&adapter.features?.has('shader-f16')?[['q4f16','_q4f16']]:[]),['q8','_quantized'],['int8','_int8'],['uint8','_uint8'],['fp32','']];
+  // Older BLOOM exports use decoder_model_merged; newer v3 exports use model.
+  const stems=bloom?['model','decoder_model_merged']:['model'];
+  const choices=stems.flatMap(stem=>dtypes.map(([dtype,suffix])=>[dtype,stem+suffix+'.onnx',stem]));
   let choice,bytes,revision;const diagnostics=[];
   for(const candidate of candidates){try{
     const response=await fetch('https://huggingface.co/api/models/'+candidate+'?blobs=true',{signal:AbortSignal.timeout(15000)});
@@ -36,16 +40,17 @@ async function load(id,source){
   send('progress',{text:`Chargement WebGPU : ${id} (${choice[0]}) — environ ${Math.ceil(bytes/1e6)} Mo de fichiers modèle.`});
   tokenizer=await AutoTokenizer.from_pretrained(id,{revision});
   try{
-    model=await AutoModelForCausalLM.from_pretrained(id,{revision,device:'webgpu',dtype:choice[0],progress_callback:p=>{if(p.status==='progress')send('progress',{text:`Téléchargement : ${p.file} — ${Math.round(p.progress)} %`,percent:p.progress});else if(p.status==='initiate')send('progress',{text:'Chargement : '+p.file})}});
+    model=await AutoModelForCausalLM.from_pretrained(id,{revision,device:'webgpu',dtype:choice[0],model_file_name:choice[2],progress_callback:p=>{if(p.status==='progress')send('progress',{text:`Téléchargement : ${p.file} — ${Math.round(p.progress)} %`,percent:p.progress});else if(p.status==='initiate')send('progress',{text:'Chargement : '+p.file})}});
   }catch(e){throw Error(message(e)+' — Ce modèle ou sa quantification peut être incompatible avec votre GPU. Essayez GPT-2 Small ou l’API Hugging Face.');}
   send('ready',{dtype:choice[0],id,device:activeDevice});
 }
 async function generate(d){
   if(!model)throw Error('Modèle non chargé.');
-  const text=d.chat?tokenizer.apply_chat_template([{role:'user',content:d.prompt}],{tokenize:false,add_generation_prompt:true}):d.prompt;
+  const useChatTemplate=d.chat&&d.instructionFormat!=='plain';
+  const text=useChatTemplate?tokenizer.apply_chat_template([{role:'user',content:d.prompt}],{tokenize:false,add_generation_prompt:true}):d.prompt;
   let inputs,output,result;
   try{
-    inputs=await tokenizer(text,{add_special_tokens:!d.chat});
+    inputs=await tokenizer(text,{add_special_tokens:!useChatTemplate});
     const n=inputs.input_ids.dims[1];
     if(n>800)throw Error('Texte trop long : '+n+' tokens. Limite pédagogique : 800.');
     try{
