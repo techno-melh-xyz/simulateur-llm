@@ -1,29 +1,19 @@
-// Separate runtimes: keep the known working version for other models.
-async function getRuntime(bloom){
-  const lib=bloom?await import('https://cdn.jsdelivr.net/npm/@huggingface/transformers@4.3.2'):await import('https://cdn.jsdelivr.net/npm/@huggingface/transformers@3.7.2');
-  lib.env.allowLocalModels=false;
-  lib.env.useBrowserCache=true;
-  if(lib.env.backends?.onnx?.wasm)lib.env.backends.onnx.wasm.numThreads=1;
-  return lib;
-}
+import { AutoTokenizer, AutoModelForCausalLM, env } from 'https://cdn.jsdelivr.net/npm/@huggingface/transformers@3.7.2';
+env.allowLocalModels=false;
+env.useBrowserCache=true;
+env.backends.onnx.wasm.numThreads=1;
 let tokenizer,model;
 const activeDevice='webgpu';
 const MAX_BYTES=1_000_000_000;
 const send=(kind,fields={})=>postMessage({kind,...fields});
 const message=e=>e?.message||String(e);
-async function load(id,source,quantization){
+async function load(id,source){
   if(!navigator.gpu)throw Error('WebGPU indisponible dans le worker. Essayez Chrome ou Edge à jour, ou l’API Hugging Face.');
   const adapter=await navigator.gpu.requestAdapter();
   if(!adapter)throw Error('Aucun adaptateur GPU. Utilisez l’API Hugging Face ou un navigateur compatible.');
   const base=source?.split('/').pop();
   const candidates=[...new Set([id,...(base?['onnx-community/'+base+'-ONNX','onnx-community/'+base,'Xenova/'+base]:[])])].filter(Boolean);
-  const bloom=/^bigscience\/bloomz?-560m$/i.test(source||'');
-  const runtime=bloom?'4.3.2':'3.7.2';
-  if(bloom&&quantization==='q4f16'&&!adapter.features?.has('shader-f16'))throw Error('Ce GPU ne prend pas en charge shader-f16. Choisissez la quantification 8 bits.');
-  // BLOOM: use the new WebGPU runtime for the 8-bit decoder, or explicit q4f16.
-  const dtypes=bloom?(quantization==='q4f16'?[['q4f16','_q4f16']]:[['q8','_quantized'],['int8','_int8'],['uint8','_uint8']]):[['q4','_q4'],['q8','_quantized'],['int8','_int8'],['uint8','_uint8'],['fp32','']];
-  const stems=bloom?['model','decoder_model_merged']:['model'];
-  const choices=stems.flatMap(stem=>dtypes.map(([dtype,suffix])=>[dtype,stem+suffix+'.onnx',stem]));
+  const choices=[['q4','model_q4.onnx'],['q8','model_quantized.onnx'],['int8','model_int8.onnx'],['uint8','model_uint8.onnx'],['fp32','model.onnx']];
   let choice,bytes,revision;const diagnostics=[];
   for(const candidate of candidates){try{
     const response=await fetch('https://huggingface.co/api/models/'+candidate+'?blobs=true',{signal:AbortSignal.timeout(15000)});
@@ -44,20 +34,18 @@ async function load(id,source,quantization){
   }catch(e){diagnostics.push(candidate+' : '+message(e));}}
   if(!choice)throw Error('Aucun fichier ONNX compatible de taille vérifiée ≤ 1 Go. '+diagnostics.join(' ; '));
   send('progress',{text:`Chargement WebGPU : ${id} (${choice[0]}) — environ ${Math.ceil(bytes/1e6)} Mo de fichiers modèle.`});
-  const {AutoTokenizer,AutoModelForCausalLM}=await getRuntime(bloom);
   tokenizer=await AutoTokenizer.from_pretrained(id,{revision});
   try{
-    model=await AutoModelForCausalLM.from_pretrained(id,{revision,device:'webgpu',dtype:choice[0],model_file_name:choice[2],progress_callback:p=>{if(p.status==='progress')send('progress',{text:`Téléchargement : ${p.file} — ${Math.round(p.progress)} %`,percent:p.progress});else if(p.status==='initiate')send('progress',{text:'Chargement : '+p.file})}});
+    model=await AutoModelForCausalLM.from_pretrained(id,{revision,device:'webgpu',dtype:choice[0],progress_callback:p=>{if(p.status==='progress')send('progress',{text:`Téléchargement : ${p.file} — ${Math.round(p.progress)} %`,percent:p.progress});else if(p.status==='initiate')send('progress',{text:'Chargement : '+p.file})}});
   }catch(e){throw Error(message(e)+' — Ce modèle ou sa quantification peut être incompatible avec votre GPU. Essayez GPT-2 Small ou l’API Hugging Face.');}
-  send('ready',{dtype:choice[0],id,device:activeDevice,runtime,filename:choice[1]});
+  send('ready',{dtype:choice[0],id,device:activeDevice});
 }
 async function generate(d){
   if(!model)throw Error('Modèle non chargé.');
-  const useChatTemplate=d.chat&&d.instructionFormat!=='plain';
-  const text=useChatTemplate?tokenizer.apply_chat_template([{role:'user',content:d.prompt}],{tokenize:false,add_generation_prompt:true}):d.prompt;
+  const text=d.chat?tokenizer.apply_chat_template([{role:'user',content:d.prompt}],{tokenize:false,add_generation_prompt:true}):d.prompt;
   let inputs,output,result;
   try{
-    inputs=await tokenizer(text,{add_special_tokens:!useChatTemplate});
+    inputs=await tokenizer(text,{add_special_tokens:!d.chat});
     const n=inputs.input_ids.dims[1];
     if(n>800)throw Error('Texte trop long : '+n+' tokens. Limite pédagogique : 800.');
     try{
@@ -78,4 +66,4 @@ async function generate(d){
     send('result',{prompt:d.prompt,text:generated,count:ids.length,seconds,speed:ids.length/Math.max(seconds,0.001),device:activeDevice});
   }finally{result?.dispose?.();if(inputs)for(const v of Object.values(inputs))v?.dispose?.();}
 }
-self.onmessage=async({data:d})=>{try{if(d.kind==='load')await load(d.id,d.source,d.quantization);else if(d.kind==='generate')await generate(d)}catch(e){send('error',{message:message(e)})}};
+self.onmessage=async({data:d})=>{try{if(d.kind==='load')await load(d.id,d.source);else if(d.kind==='generate')await generate(d)}catch(e){send('error',{message:message(e)})}};
