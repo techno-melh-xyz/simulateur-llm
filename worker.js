@@ -2,37 +2,43 @@ import { AutoTokenizer, AutoModelForCausalLM, env } from 'https://cdn.jsdelivr.n
 env.allowLocalModels=false;
 env.useBrowserCache=true;
 env.backends.onnx.wasm.numThreads=1;
-let tokenizer,model,activeDevice='wasm';
+let tokenizer,model;
+const activeDevice='webgpu';
+const MAX_BYTES=1_000_000_000;
 const send=(kind,fields={})=>postMessage({kind,...fields});
 const message=e=>e?.message||String(e);
-async function load(id,source,heavy,device='wasm'){
-  if(!['wasm','webgpu'].includes(device))throw Error('Moteur inconnu.');
-  activeDevice=device;
-  if(device==='webgpu'){
-    if(!navigator.gpu)throw Error('WebGPU indisponible dans le worker. Essayez Chrome ou Edge à jour, ou le CPU.');
-    const adapter=await navigator.gpu.requestAdapter();
-    if(!adapter)throw Error('Aucun adaptateur GPU. Utilisez le mode CPU / WebAssembly.');
-  }
+async function load(id,source){
+  if(!navigator.gpu)throw Error('WebGPU indisponible dans le worker. Essayez Chrome ou Edge à jour, ou l’API Hugging Face.');
+  const adapter=await navigator.gpu.requestAdapter();
+  if(!adapter)throw Error('Aucun adaptateur GPU. Utilisez l’API Hugging Face ou un navigateur compatible.');
   const base=source?.split('/').pop();
   const candidates=[...new Set([id,...(base?['onnx-community/'+base+'-ONNX','onnx-community/'+base,'Xenova/'+base]:[])])].filter(Boolean);
-  // Same preferred quantization on both engines to make speed comparisons meaningful.
-  const choices=[['q4','model_q4.onnx'],['q8','model_quantized.onnx'],['int8','model_int8.onnx'],['uint8','model_uint8.onnx'],...(!heavy?[['fp32','model.onnx']]:[])];
-  let choice;const diagnostics=[];
+  const choices=[['q4','model_q4.onnx'],['q8','model_quantized.onnx'],['int8','model_int8.onnx'],['uint8','model_uint8.onnx'],['fp32','model.onnx']];
+  let choice,bytes,revision;const diagnostics=[];
   for(const candidate of candidates){try{
-    const response=await fetch('https://huggingface.co/api/models/'+candidate);
+    const response=await fetch('https://huggingface.co/api/models/'+candidate+'?blobs=true',{signal:AbortSignal.timeout(15000)});
     if(!response.ok){diagnostics.push(candidate+' : HTTP '+response.status);continue;}
     const info=await response.json();if(info.gated||info.private)continue;
-    const files=new Set((info.siblings||[]).map(x=>x.rfilename));
-    choice=choices.find(([,file])=>files.has('onnx/'+file));
-    if(choice){id=candidate;break;}
+    const files=info.siblings||[];
+    const sizeOf=f=>f.size??f.lfs?.size;
+    for(const c of choices){
+      const path='onnx/'+c[1];
+      if(!files.some(f=>f.rfilename===path))continue;
+      const selected=files.filter(f=>f.rfilename===path||f.rfilename.startsWith(path+'_data')||f.rfilename.startsWith(path+'data')||f.rfilename.startsWith(path+'.data')||(!f.rfilename.includes('/')&&/^(.*\.json|.*\.model|vocab\.txt|merges\.txt|.*\.tiktoken)$/i.test(f.rfilename)));
+      if(selected.some(f=>!Number.isFinite(sizeOf(f))||sizeOf(f)<0)){diagnostics.push(candidate+' '+c[0]+' : taille inconnue');continue;}
+      const total=selected.reduce((sum,f)=>sum+sizeOf(f),0);
+      if(total>MAX_BYTES){diagnostics.push(candidate+' '+c[0]+' : '+Math.ceil(total/1e6)+' Mo > 1 Go');continue;}
+      choice=c;bytes=total;id=candidate;revision=info.sha||'main';break;
+    }
+    if(choice)break;
   }catch(e){diagnostics.push(candidate+' : '+message(e));}}
-  if(!choice)throw Error('Aucun fichier ONNX compatible trouvé. '+diagnostics.join(' ; '));
-  send('progress',{text:`Chargement ${device==='webgpu'?'WebGPU':'WebAssembly'} : ${id} (${choice[0]})`});
-  tokenizer=await AutoTokenizer.from_pretrained(id);
+  if(!choice)throw Error('Aucun fichier ONNX compatible de taille vérifiée ≤ 1 Go. '+diagnostics.join(' ; '));
+  send('progress',{text:`Chargement WebGPU : ${id} (${choice[0]}) — environ ${Math.ceil(bytes/1e6)} Mo de fichiers modèle.`});
+  tokenizer=await AutoTokenizer.from_pretrained(id,{revision});
   try{
-    model=await AutoModelForCausalLM.from_pretrained(id,{device,dtype:choice[0],progress_callback:p=>{if(p.status==='progress')send('progress',{text:`Téléchargement : ${p.file} — ${Math.round(p.progress)} %`,percent:p.progress});else if(p.status==='initiate')send('progress',{text:'Chargement : '+p.file})}});
-  }catch(e){throw Error(message(e)+(device==='webgpu'?' — Ce modèle ou sa quantification peut être incompatible avec votre GPU. Essayez SmolLM2-135M ou sélectionnez CPU / WebAssembly.':''));}
-  send('ready',{dtype:choice[0],id,device});
+    model=await AutoModelForCausalLM.from_pretrained(id,{revision,device:'webgpu',dtype:choice[0],progress_callback:p=>{if(p.status==='progress')send('progress',{text:`Téléchargement : ${p.file} — ${Math.round(p.progress)} %`,percent:p.progress});else if(p.status==='initiate')send('progress',{text:'Chargement : '+p.file})}});
+  }catch(e){throw Error(message(e)+' — Ce modèle ou sa quantification peut être incompatible avec votre GPU. Essayez GPT-2 Small ou l’API Hugging Face.');}
+  send('ready',{dtype:choice[0],id,device:activeDevice});
 }
 async function generate(d){
   if(!model)throw Error('Modèle non chargé.');
@@ -60,4 +66,4 @@ async function generate(d){
     send('result',{prompt:d.prompt,text:generated,count:ids.length,seconds,speed:ids.length/Math.max(seconds,0.001),device:activeDevice});
   }finally{result?.dispose?.();if(inputs)for(const v of Object.values(inputs))v?.dispose?.();}
 }
-self.onmessage=async({data:d})=>{try{if(d.kind==='load')await load(d.id,d.source,d.heavy,d.device);else if(d.kind==='generate')await generate(d)}catch(e){send('error',{message:message(e)})}};
+self.onmessage=async({data:d})=>{try{if(d.kind==='load')await load(d.id,d.source);else if(d.kind==='generate')await generate(d)}catch(e){send('error',{message:message(e)})}};
