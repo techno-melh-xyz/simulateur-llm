@@ -40,6 +40,18 @@ async function load(id,source){
   }catch(e){throw Error(message(e)+' — Ce modèle ou sa quantification peut être incompatible avec votre GPU. Essayez GPT-2 Small ou l’API Hugging Face.');}
   send('ready',{dtype:choice[0],id,device:activeDevice});
 }
+// Distribution initiale et distribution de tirage (température + top-k).
+function nextDistributions(scores,temperature,k=50){
+  let max=-Infinity;
+  for(const x of scores){if(Number.isNaN(x)||x===Infinity)throw Error('Logits invalides.');if(x>max)max=x;}
+  if(!Number.isFinite(max)||!Number.isFinite(temperature)||temperature<=0)throw Error('Distribution non calculable.');
+  let total=0;const ranked=[];
+  for(let id=0;id<scores.length;id++){const x=scores[id];if(!Number.isFinite(x))continue;total+=Math.exp(x-max);ranked.push({id,x});}
+  ranked.sort((a,b)=>b.x-a.x||a.id-b.id);
+  const kept=ranked.slice(0,k),den=kept.reduce((s,v)=>s+Math.exp((v.x-max)/temperature),0);
+  if(!(total>0&&den>0))throw Error('Distribution non calculable.');
+  return {before:ranked.slice(0,10).map(v=>({id:v.id,p:100*Math.exp(v.x-max)/total})),after:kept.slice(0,10).map(v=>({id:v.id,p:100*Math.exp((v.x-max)/temperature)/den})),kept:kept.length};
+}
 async function generate(d){
   if(!model)throw Error('Modèle non chargé.');
   const text=d.chat?tokenizer.apply_chat_template([{role:'user',content:d.prompt}],{tokenize:false,add_generation_prompt:true}):d.prompt;
@@ -50,12 +62,11 @@ async function generate(d){
     if(n>800)throw Error('Texte trop long : '+n+' tokens. Limite pédagogique : 800.');
     try{
       output=await model(inputs);
-      const logits=output.logits,vocab=logits.dims.at(-1),scores=logits.data.slice(-vocab);
-      let max=-Infinity;for(const x of scores)if(x>max)max=x;
-      const exp=Array.from(scores,x=>Math.exp(x-max));const total=exp.reduce((a,b)=>a+b,0);
-      if(!Number.isFinite(total)||total<=0)throw Error('Distribution non calculable.');
-      const items=exp.map((x,id)=>({id,p:100*x/total})).sort((a,b)=>b.p-a.p).slice(0,10).map(x=>({token:tokenizer.decode([x.id],{skip_special_tokens:false}),p:x.p}));
-      send('predictions',{items});
+      const logits=output.logits,vocab=logits.dims.at(-1);
+      let data;try{data=logits.data;}catch(e){if(typeof logits.getData!=='function')throw e;data=await logits.getData();}
+      const scores=data.slice(-vocab),dist=nextDistributions(scores,d.greedy?1:d.temp);
+      const decode=items=>items.map(x=>({...x,token:tokenizer.decode([x.id],{skip_special_tokens:false})}));
+      send('predictions',{items:decode(dist.before),after:d.greedy?null:decode(dist.after),temperature:d.temp,kept:dist.kept});
     }catch(e){send('prediction-warning',{message:message(e)});}
     finally{if(output)for(const value of Object.values(output))value?.dispose?.();}
     const start=performance.now();
